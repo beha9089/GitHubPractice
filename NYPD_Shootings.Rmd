@@ -1,0 +1,146 @@
+---
+title: "NYPD_Shooting_Incidents"
+output: html_document
+date: "2022-11-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#### Import and Summarize NYPD Shooting Incidents Data
+```{r read in NYPD data, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(lubridate)
+library(crosstable)
+library(dplyr)
+library(lubridate)
+library(TSstudio)
+
+data_url <- 'https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD'
+
+nypd_shootings <- read_csv(data_url)
+
+# Get a summary
+summary(nypd_shootings)
+str(nypd_shootings, give.attr = FALSE)
+
+```
+
+
+#### Data Notes 
+1. Jurisdiction codes 0(Patrol), 1(Transit) and 2(Housing) represent NYPD whilst codes 3 and more represent non NYPD jurisdictions.
+2. Each row is a shooting incident but a shooting incident can have multiple victims involved and as a result duplicate INCIDENT_KEY’s are produced. Each INCIDENT_KEY represents a victim but similar duplicate keys are counted as one incident.
+3. Shooting incidents occurring near an intersection are represented by the X coordinate and Y coordinates of the intersection Shooting incidents occurring anywhere other than at an intersection are geo-located to the middle of the nearest street segment where appropriate. 
+
+
+
+#### Clean Up Data
+```{r data conversions}
+
+# Visualize the distribution of perp age
+plot(as.factor(nypd_shootings$PERP_AGE_GROUP))
+
+# Remove invalid perp age values
+nypd_shootings$PERP_AGE_GROUP[nypd_shootings$PERP_AGE_GROUP %in% c(1020, 224, 940)] <- NA
+
+# Define the list of variables that should be factors
+factor_vars <- c('BORO'
+                 ,'PRECINCT'
+                 ,'JURISDICTION_CODE'
+                 ,'LOCATION_DESC'
+                 ,'PERP_AGE_GROUP'
+                 ,'PERP_RACE'
+                 ,'PERP_SEX'
+                 ,'VIC_AGE_GROUP'
+                 ,'VIC_RACE'
+                 ,'VIC_SEX')
+
+# Convert variables to factors
+nypd_shootings[factor_vars] <- lapply(nypd_shootings[factor_vars], as.factor)
+
+# Convert OCCUR_DATE to date
+nypd_shootings$OCCUR_DATE <- as.Date(nypd_shootings$OCCUR_DATE, '%m/%d/%Y')
+
+# Create a datetime variable
+nypd_shootings$OCCUR_DT <- nypd_shootings %>%
+  select(OCCUR_DATE, OCCUR_TIME) %>%
+  mutate(OCCUR_DT = as.POSIXct(paste(OCCUR_DATE, OCCUR_TIME), format = '%Y-%m-%d %H:%M:%S')) %>%
+  select(OCCUR_DT)
+
+
+# Get new summaries
+summary(nypd_shootings)
+str(nypd_shootings, give.attr = FALSE)
+
+# Get a count of NAs per each variable
+sapply(nypd_shootings, function(x) sum(is.na(x)))
+# How many incidents lack demographic data on perp
+sum(is.na(nypd_shootings$PERP_AGE_GROUP) |
+      is.na(nypd_shootings$PERP_SEX) |
+      is.na(nypd_shootings$PERP_RACE))
+
+```
+
+Approximately 60% of incidents lack a value for LOCATION_DESC, which will hurt its utility. Likely it will not be worth ignoring these incidents and so some form of imputation would be necessary to work with this variable.
+Additionally, over 1/3 of incidents lack demographic data (age, sex, race) on the perpetrator. I do not plan to impute these details.
+
+#### Visualize Data
+```{r data visuals}
+# Get the distribution of victims by age and sex; most victims are male
+nypd_shootings %>%
+  select(VIC_AGE_GROUP, VIC_SEX) %>%
+  crosstable(., VIC_SEX, by = VIC_AGE_GROUP, total = 'both', #showNA = 'always',
+             percent_digits = 1, percent_pattern = '{n} ({p_col}/{p_row})') %>%
+  as_flextable(keep_id = TRUE)
+
+# Create a very simple linear model for victim sex based on victim age group
+lm_age <- nypd_shootings %>%
+  mutate(male_vic = if_else(VIC_SEX == 'M', 1, 0)) %>%
+  filter(OCCUR_DATE >= as.Date('2017-01-01')) %>%
+  lm(formula = male_vic ~ VIC_AGE_GROUP)
+summary(lm_age)
+
+# Show the time series of shooting incidents by month, from Jan'06 to Dec'21
+nypd_shootings %>%
+  mutate(occur_month = ceiling_date(OCCUR_DATE, unit = 'month') - 1) %>%
+  group_by(occur_month) %>%
+  arrange(occur_month) %>%
+  summarise(incidents = n()) %>%
+  select(incidents) %>%
+  ts(., start = c(2006, 1), end = c(2021, 12), frequency = 12) %>%
+  ts_plot(title = 'NYC Shooting Incidents by Month', 
+          Xtitle = '# Shooting Incidents', 
+          Ytitle = 'Incident Month',
+          line.mode = 'lines+markers',
+          Xgrid = TRUE, Ygrid = TRUE)
+
+# Zoom in on the latest 6 years of data and visualize YoY behavior
+nypd_shootings %>%
+  filter(OCCUR_DATE >= as.Date('2016-01-01')) %>%
+  mutate(occur_month = ceiling_date(OCCUR_DATE, unit = 'month') - 1) %>%
+  group_by(occur_month) %>%
+  arrange(occur_month) %>%
+  summarise(incidents = n()) %>%
+  mutate(
+    occur_year = year(occur_month),
+    occur_month = month(occur_month, label = TRUE, abbr = TRUE)
+  ) %>%
+  ggplot(., aes(occur_month, incidents, group = factor(occur_year))) +
+  geom_point(aes(shape = factor(occur_year))) + 
+  geom_line()
+```
+
+While no victim cross-section of sex and age make up a majority of these incidents, the largest group, males age 25-44, make up ~41% of all victims. The second most common group are males ages 18-24, making up ~35% of all victims. That is, just over 75% of all victims are males ages 18-44. Based on this, it is not surprising to see that the simple linear model used to predict the sex of the victim (1 male, 0 otherwise) has a very high intercept.    
+The time series data show clearly that in summer 2020, NYC saw a large increase in shooting incidents that reversed the previous ~3 years of low rates (low rates 2017 - 2019). This increase was sustained through the end of 2021. Looking more closely at these data, we see that 2020 breaks with the previous years beginning in May. This increased frequency continues through the end of the reporting period (though it is interesting to note that Jan'21 appears to have been a typical month). 
+
+#### Conclusion
+In reviewing these data on shooting incidents in New York City, we have noted three high-level details.  
+1. Data on the perpetrator (race, age, etc.) are often missing  
+2. Most shooting victims are male, between ages 18 - 44  
+3. Shooting incident frequency peaked in the summer of 2020, and remained elevated through Dec'21, following three years of below typical rates  
+
+Many sources of potential bias exist with these data and any associated analysis. In the data we must consider issues such as social and political biases that impact the collection of data, such as which areas/neighborhoods are policed and biases in reporting. For example, are all victims equally likely to report the incident and/or work with the police? When details are provided, such as perpetrator race, age, etc., how reliable are these details? It is well known that our recall of stressful events is often poor. My own personal bias is to disregard demographic data on the perpetrator(s) as I am suspicious of the data and because I am hesitant to produce a conclusion that might align with preconceived notions of the type of person who commits violent crime. Additionally, I believe it would be difficult to avoid introducing personal bias in developing a conclusion around the spike in crime beginning in summer 2020. To mitigate this I would look to leverage additional data to isolate what made 2020 - 2021 different from previous years, avoiding armchair hypotheses and easy explanations that come from having lived through the period ("it's COVID madness").
+
+
